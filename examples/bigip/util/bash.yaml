@@ -1,0 +1,222 @@
+# Event Inputs:
+# {
+#   "com.f5.bigip.util.bash": {
+#     "data": {
+#       "ctx": "6fd0e8e212f96fd0e8e212f9",
+#       "endpoint": {
+#         "host": "3.26.24.101",
+#         "port": "8443",
+#         "insecure": false
+#       },
+#       "auth": {
+#         "user": "admin",
+#         "password": "admin",
+#       },
+#       "cmd": "-c 'tmsh list ltm virtual'"
+#     },
+#     "datacontenttype": "application/json",
+#     "id": "24fb8dcc-5f41-4354-9f92-6fd0e8e212f9",
+#     "source": "myapp",
+#     "specversion": "1.0",
+#     "type": "com.f5.bigip.util.bash"
+#   }
+# }
+# Event Outputs:
+# {
+#   "com.f5.bigip.util.bash.complete": {
+#     "data": {
+#       "result": {
+#         "command": "run",
+#         "commandResult": "total 20K\ndrwxr-xr-x.   5 root root 4.0K Jun  8 21:39 .\ndrwxr-xr-x. 108 root root 4.0K May  5 14:20 ..\ndrwxr-xr-x.   2 root root 4.0K May  5 14:18 deps\ndrwxr-xr-x.   2 root root 4.0K May  5 14:18 requires\nlrwxrwxrwx.   1 root root   31 May  5 14:18 run -\u003e /etc/bigstart/scripts/restjavad\ndrwx------.   2 root root 4.0K Jun  8 22:16 supervise\n",
+#         "kind": "tm:util:bash:runstate",
+#         "utilCmdArgs": "-c 'ls -lah'"
+#       },
+#     },
+#     "endpoint": {
+#       "host": "3.26.24.101",
+#       "port": "8443",
+#       "insecure": false
+#     },
+#     "cmd": "-c 'tmsh list ltm virtual'",
+#     "ctx": "6fd0e8e212f96fd0e8e212f9",
+#     "datacontenttype": "application/json",
+#     "id": "24fb8dcc-5f41-4354-9f92-6fd0e8e212f9",
+#     "source": "myapp",
+#     "specversion": "1.0",
+#     "type": "com.f5.bigip.util.bash"
+#   }
+# }
+# {
+#   "com.f5.bigip.util.bash.failure": {
+#     "data": {
+#       "msg": "error message",
+#       "error": "connection" (or request)
+#     },
+#     "endpoint": {
+#       "host": "3.26.24.101",
+#       "port": "8443",
+#       "insecure": false
+#     },
+#     "cmd": "-c 'tmsh list ltm virtual'",
+#     "ctx": "6fd0e8e212f96fd0e8e212f9",
+#     "datacontenttype": "application/json",
+#     "id": "24fb8dcc-5f41-4354-9f92-6fd0e8e212f9",
+#     "source": "myapp",
+#     "specversion": "1.0",
+#     "type": "com.f5.bigip.util.bash"
+#   }
+# }
+
+description: A simple workflow to execute a bash command on a BigIP via iControl.
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# vault workflow. Example of the event is shown above in the description
+#
+start:
+  type: event
+  state: validate-input
+  event: 
+    type: com.f5.bigip.util.bash
+
+functions:
+- id: httprequest
+  type: reusable
+  image: direktiv/request:v1
+
+states:
+- id: validate-input
+  type: validate
+  subject: jq(."com.f5.bigip.util.bash".data)
+  schema:
+    title: Execute Bash Command
+    type: object
+    required:
+    - endpoint
+    - auth
+    - cmd
+    properties:
+      endpoint:
+        type: object
+        title: Endpoint Information
+        properties:
+          host:
+            type: string
+            title: Host IP or FQDN
+          port:
+            type: number
+            title: Host Port
+            default: 8443
+          insecure:
+            type: boolean
+            title: skip tls verify
+            default: false
+      auth:
+        type: object
+        title: Auth Information
+        properties:
+          user:
+            type: string
+            title: User Name to auth with
+          password:
+            type: string
+            title: Password to authenticate with
+      cmd:
+        type: string
+        title: Command to Run
+  transition: set-data
+
+#
+# Move important fields out of .data for response message.
+#
+- id: set-data
+  type: noop
+  transform: jq(.endpoint = ."com.f5.bigip.util.bash".data.endpoint | .cmd = ."com.f5.bigip.util.bash".data.cmd)
+  transition: run-command
+
+#
+# Execute Bash Command
+#
+- id: run-command
+  type: action
+  action:
+    function: httprequest
+    input:
+      method: "POST"
+      url: https://jq(.endpoint.host):jq(.endpoint.port)/mgmt/tm/util/bash
+      headers:
+        "Content-Type": "application/json"
+      username: jq(."com.f5.bigip.util.bash".data.auth.user)
+      password: jq(."com.f5.bigip.util.bash".data.auth.password)
+      insecureSkipVerify: jq(.endpoint.insecure)
+      body:
+        command: run
+        utilCmdArgs: jq(.cmd)
+    retries:
+      max_attempts: 3
+      delay: PT5S
+      multiplier: 2.0
+      codes: [".*"]
+  catch:
+    - error: "*"
+      transition: failed-connection
+  transition: check-response
+
+#
+# Make sure we received a valid response
+#
+- id: check-response
+  type: switch
+  log: jq(.)
+  conditions:
+    - condition: 'jq(.return."status-code" != 200)'
+      transform: jq(.status = .return.status | .status-code = .return.status-code | del (."com.f5.bigip.util.bash"))
+      transition: failed-request
+  defaultTransition: get-complete
+  defaultTransform: jq(.result = .return.body | del (.return) | del (."com.f5.bigip.util.bash"))
+
+#
+# Handle any failed connections
+#
+- id: failed-connection
+  type: generateEvent
+  log: Connection to iControl Rest failed - jq(.error)
+  event: 
+    type: com.f5.bigip.util.bash.failure
+    source: bigip/util/bash
+    data: jq(.error = "connection" | .msg = .error)
+    context:      
+      host: jq(.endpoint.host)
+      cmd: jq(.cmd)
+      msg: jq(.error)
+      error: connection
+
+#
+# Handle any failed API calls
+#
+- id: failed-request
+  type: generateEvent
+  log: API call failed with error code - jq(.status-code)
+  event: 
+    type: com.f5.bigip.util.bash.failure
+    source: bigip/util/bash
+    data: jq(.error = "request" | .msg = .status)
+    context:  
+      host: jq(.endpoint.host)
+      cmd: jq(.cmd)
+      msg: jq(.msg)
+      error: request
+
+# 
+# Generate a get complete event with the content of the AS3 config.
+#
+- id: get-complete
+  type: generateEvent
+  log: jq(.)
+  event:
+    type: com.f5.bigip.util.bash.complete
+    source: bigip/util/bash
+    data: jq(.)
+    context:  
+      host: jq(.endpoint.host)
+      cmd: jq(.cmd)

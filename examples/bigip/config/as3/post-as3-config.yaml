@@ -1,0 +1,125 @@
+# Event Inputs:
+# {
+#   "com.f5.bigip.config.as3.post": {
+#     "data": {
+#       "host": "3.26.24.101",
+#       "port": "8443",
+#       "user": "admin",
+#       "insecure": false,
+#       "as3": {<as3 object>}
+#     },
+#     "datacontenttype": "application/json",
+#     "id": "24fb8dcc-5f41-4354-9f92-6fd0e8e212f9",
+#     "source": "myapp",
+#     "specversion": "1.0",
+#     "type": "com.f5.bigip.config.as3.post"
+#   }
+# }
+#
+
+description: A simple workflow to post an AS3 config to a BigIp device.
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# vault workflow. Example of the event is shown above in the description
+#
+start:
+  type: event
+  state: post-config
+  event: 
+    type: com.f5.bigip.config.as3.post
+
+functions:
+- id: httprequest
+  type: reusable
+  image: direktiv/request:v1
+
+states:
+#
+# post Device Config via AS3.
+#
+- id: post-config
+  type: action
+  log: jq(."com.f5.bigip.config.as3.post".data.as3)
+  action:
+    function: httprequest
+    input:
+      method: "POST"
+      url: https://jq(."com.f5.bigip.config.as3.post".data.host):jq(."com.f5.bigip.config.as3.post".data.port)/mgmt/shared/appsvcs/declare
+      headers:
+        "Content-Type": "application/json"
+      username: jq(."com.f5.bigip.config.as3.post".data.user)
+      password: jq(."com.f5.bigip.config.as3.post".data.password)
+      insecureSkipVerify: jq(."com.f5.bigip.config.as3.post".data.insecure)
+      body:
+        action: "deploy"
+        class: "AS3"
+        persist: true
+        declaration: 'jq(."com.f5.bigip.config.as3.post".data.as3)'
+    retries:
+      max_attempts: 3
+      delay: PT20S
+      multiplier: 2.0
+      codes: [".*"]
+  catch:
+    - error: "*"
+      transition: failed-connection
+  transition: check-response
+
+#
+# Make sure we received a valid response
+#
+- id: check-response
+  type: switch
+  log: jq(.)
+  conditions:
+    - condition: 'jq(.return."status-code" != 200)'
+      transition: failed-request
+  defaultTransition: post-complete
+  defaultTransform: jq(.host = ."com.f5.bigip.config.as3.post".data.host | .user = ."com.f5.bigip.config.as3.post".data.user | .as3 = .return.body | del (.return) | del (."com.f5.bigip.config.as3.post"))
+
+#
+# Handle any failed connections
+#
+- id: failed-connection
+  type: generateEvent
+  log: Connection to HashiCorp Vault failed - jq(.error)
+  event: 
+    type: com.f5.bigip.config.as3.post.failure
+    source: bigip/config/as3/post
+    data: jq(.error)
+    context:
+      host: jq(."com.f5.bigip.config.as3.post".data.host)
+      user: jq(."com.f5.bigip.config.as3.post".data.user)
+      msg: jq(.error)
+      error: connection
+
+#
+# Handle any failed API calls
+#
+- id: failed-request
+  type: generateEvent
+  log: API call failed with error code - jq(.return.status)
+  event: 
+    type: com.f5.bigip.config.as3.post.failure
+    source: bigip/config/as3/post
+    data: jq(.return = .return | .data = ."com.f5.bigip.config.as3.post".data | del (."com.f5.bigip.config.as3.post"))
+    context:
+      host: jq(."com.f5.bigip.config.as3.post".data.host)
+      user: jq(."com.f5.bigip.config.as3.post".data.user)
+      msg: jq(.return.status)
+      error: request
+
+# 
+# Generate a post complete event with the content of the AS3 config.
+#
+- id: post-complete
+  type: generateEvent
+  log: jq(.)
+  event:
+    type: com.f5.bigip.config.as3.post.complete
+    source: bigip/config/as3/post
+    data: jq(.)
+    context:
+      host: jq(.host)
+      user: jq(.user) 
