@@ -1,0 +1,96 @@
+description: Push AS3 and TS configs to a bigip device.
+states:
+- id: first
+  type: noop
+  log: jq(.)
+  transition: lookup-password-event
+
+- id: lookup-password-event
+  type: generateEvent
+  log: 'Generating the lookup to the Vault'
+  event:
+    type: com.f5.vault.lookup.request
+    source: bash-test
+    data: jq(.var.vault = "googlesm" | .var.googlesm.version = "latest" | .var.googlesm.secretname = .state.secret_id.value | .var)
+    context:
+      vault: "googlesm"
+      ctx: jq(.state.resource_name.value)
+  transform: jq(del(.var))
+  transition: wait-for-lookup-password
+
+#
+# This state now waits for the return event from any of the subflows calling the vaults
+# to extract the old passwords from the vault
+#
+- id: wait-for-lookup-password
+  type: eventXor
+  timeout: PT90S
+  events:
+    - transition: set-var
+      event:
+        type: com.f5.vault.lookup.complete
+        context:
+          vault: "googlesm"
+          ctx: jq(.state.resource_name.value)
+      transform: jq(.auth.password = ."com.f5.vault.lookup.complete".data.password | del(."com.f5.vault.lookup.complete"))
+    - transition: workflow-failure
+      event:
+        type: com.f5.vault.lookup.failure
+        context:
+          vault: "googlesm"
+          ctx: jq(.state.resource_name.value)   
+
+- id: set-var
+  type: noop
+  log: jq(.)
+  transform: jq(.var.host = .state.external_public_ips.value[0] | .var.port = "8443" | .var.user = "admin" | .var.password = .auth.password | .var.insecure = true | .var.as3 = .as3)
+  transition: event-push-as3
+
+#
+# This state will send an event which contains the input to a workflow which will fetch the as3 config for a bigIP.
+#
+- id: event-push-as3
+  type: generateEvent
+  log: jq(.var)
+  event:
+    type: com.f5.bigip.config.as3.post
+    source: push-bigip-config
+    data: jq(.var)
+    context:
+      host: jq(.var.host)
+  transition: wait-for-as3-push
+
+#
+# This state now waits for the return event from any of the subflows calling the vaults
+# to generate a new passwords from the vault
+#
+- id: wait-for-as3-push
+  type: eventXor
+  timeout: PT90S
+  events:
+    - transition: workflow-complete
+      event:
+        type: com.f5.bigip.config.as3.post.complete
+        context:
+          host: jq(.var.host)
+      transform: jq(.as3_result = ."com.f5.bigip.config.as3.post.complete".data)
+    - transition: workflow-failure
+      event:
+        type: com.f5.bigip.config.as3.post.failure
+        context:
+          host: jq(.var.host)  
+      transform: jq(.as3_result = ."com.f5.bigip.config.as3.post.failure".data)
+
+#
+# Handle the failure event from the update
+#
+- id: workflow-failure
+  type: noop
+  log: 'Failure occured jq(.)'
+
+#
+# Handle the success event from the password rotation process
+#
+- id: workflow-complete
+  type: noop
+  log: "Success! BigIP Config has been resolved successfully."

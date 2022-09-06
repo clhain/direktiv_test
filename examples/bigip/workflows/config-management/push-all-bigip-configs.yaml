@@ -1,0 +1,86 @@
+description: Push bigip configs to all devices and send Teams notice.
+
+functions:
+- id: post
+  image: direktiv/teams:v1
+  type: reusable
+- id: request
+  type: reusable
+  image: direktiv/request:v1
+- id: push-bigip-config
+  type: subflow
+  workflow: push-bigip-config
+states:
+- id: filter-master
+  type: switch
+  log: jq(.)
+  conditions:
+    - condition: 'jq(.ref != "refs/heads/master")'
+      transition: skip-request
+  defaultTransition: git
+  defaultTransform: 'jq(. = {})'
+- id: git 
+  type: action
+  log: jq(.)
+  action:
+    function: request
+    input:
+      method: "GET"
+      url: "<repo>/deployments/file_tree.json"
+      username: <user>
+      password: <password>
+  transform: jq(.deployments = .return.body.deployments | del(.return))
+  transition: buildhosts
+- id: buildhosts
+  type: noop
+  transform: 'jq( .bigips = [.deployments.prod.bigip | to_entries[] | {"host": .key}] | del(.deployments))'
+  transition: read-as3s
+- id: read-as3s
+  type: foreach
+  array: 'jq(.bigips)'
+  action:
+    function: request
+    input:
+      method: "GET"
+      url: "<repo>/deployments/prod/bigip/jq(.host)/master_config.json"
+      username: <user>
+      password: <password>
+  transform: jq(.bigips = [.return[].body] | del(.results))
+  transition: push-configs
+- id: push-configs
+  type: foreach
+  array: 'jq(.bigips)'
+  action:
+    function: push-bigip-config
+    input: jq(.)
+  transform: jq(.msg = [.return[] | .msg.host = .state.resource_name.value | .msg.message = .as3_result.result.results[0].message | .msg.errors = (if .as3_result.result.results[0].errors != null then .as3_result.result.results[0].errors else [] end) | .msg])
+  transition: write-message
+- id: write-message
+  type: action
+  log: jq(.)
+  action:
+    function: post
+    input:
+      body:
+        type: message
+        attachments:
+        - contentType: application/vnd.microsoft.card.adaptive
+          content:
+            $schema: http://adaptivecards.io/schemas/adaptive-card.json
+            type: AdaptiveCard
+            version: "1.2"
+            body:
+            - type: TextBlock
+              text: BigIP AS3 Push Results
+              size: large
+              weight: bolder
+            - type: Container
+              items: 'jq([.msg[] | .rows = {"type": "Container", "items": [{"type": "TextBlock", "weight": "bolder", "text": ("Device: " + .host)}, {"type": "TextBlock", "text": ("Result: " + .message)},{"type": "TextBlock", "text": ("Errors: " + .errors[])}]} | .rows])'
+      url: <webhook url>
+
+#
+# Handle the case where branch is not master.
+#
+- id: skip-request
+  type: noop
+  log: 'Skipped workflow (branch is not master: jq(.ref))'

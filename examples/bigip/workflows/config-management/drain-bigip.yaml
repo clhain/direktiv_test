@@ -1,0 +1,67 @@
+
+description: Push bigip configs to all devices and send Teams notice.
+
+functions:
+- id: post
+  image: direktiv/teams:v1
+  type: reusable
+- id: git
+  image: direktiv/git:v5
+  type: reusable
+states:
+- id: git 
+  type: action
+  action:
+    function: git
+    input: 
+      clone:
+        repo: <repo>
+        user: <user>
+        pwd: <token>
+      cmds:
+      - cmd: list-branches
+      - cmd: script
+        script:
+          data: |
+            #!/bin/bash
+            git checkout dev
+            echo -e "_overrides: {\n\tapp: { enable: false }\n}" > ./deployments/prod/bigip/us-west1-bigip-1/override.cue
+            git add .
+          type: plain
+      - cmd: status
+      - cmd: commit
+        args:
+        - clhain
+        - c.hain@f5.com
+        - committed by drain BigIP Workflow
+      - cmd: list-commits
+      - continue: true
+        cmd: push
+        args:
+        - dev
+  transition: write-message
+- id: write-message
+  type: action
+  log: jq(.)
+  action:
+    function: post
+    input:
+      body:
+        type: message
+        attachments:
+        - contentType: application/vnd.microsoft.card.adaptive
+          content:
+            $schema: http://adaptivecards.io/schemas/adaptive-card.json
+            type: AdaptiveCard
+            version: "1.2"
+            actions:
+              - type: Action.OpenUrl
+                title: View PR
+                url: "<repo>/compare/dev?expand=1"
+            body:
+            - type: TextBlock
+              text: "A Pull Request Is Ready To Drain BigIP: us-west1-bigip-1"
+              size: large
+              weight: bolder
+ 
+      url: <webhook url>

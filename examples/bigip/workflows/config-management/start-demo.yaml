@@ -1,0 +1,92 @@
+
+description: Push bigip configs to all devices and send Teams notice.
+
+functions:
+- id: post
+  image: direktiv/teams:v1
+  type: reusable
+states:
+- id: write-message
+  type: action
+  log: jq(.)
+  action:
+    function: post
+    input:
+      body:
+        type: message
+        attachments:
+        - contentType: application/vnd.microsoft.card.adaptive
+          content:
+            $schema: http://adaptivecards.io/schemas/adaptive-card.json
+            type: AdaptiveCard
+            version: "1.2"
+            actions:
+              - type: Action.OpenUrl
+                title: Drain BigIp (us-west1-bigip-1)
+                url: "<direktiv-host>/api/namespaces/prod/tree/examples/bigip/workflows/config-management/drain-bigip?op=wait"
+              - type: Action.OpenUrl
+                title: Drain Cluster (us-west1-cluster-1)
+                url: "<direktiv-host>/api/namespaces/prod/tree/examples/bigip/workflows/config-management/drain-bigip?op=wait"
+              - type: Action.OpenUrl
+                title: Deploy New BigIP (West Region)
+                url: "<direktiv-host>/api/namespaces/prod/tree/examples/bigip/workflows/config-management/drain-bigip?op=wait"
+              - type: Action.OpenUrl
+                title: All Workflows
+                url: "<direktiv-host>/n/prod/explorer/examples/bigip/workflows/config-management"
+            body:
+            - type: TextBlock
+              text: Global SLO Violation Detected
+              size: large
+              weight: bolder
+            - type: Container
+              items: 
+              - type: TextBlock
+                text: Error Correlations
+                weight: bolder
+                size: large
+              - type: Container
+                items:
+                - type: TextBlock
+                  text: "By Device:"
+                  weight: bolder
+                  size: large
+                - type: FactSet
+                  facts:
+                  - title: us-west1-bigip-1
+                    value: 100%
+                  - title: us-west1-bigip-2
+                    value: 0%
+                  - title: us-east1-bigip-1
+                    value: 0%
+                  - title: us-east1-bigip-2
+                    value: 0%
+                - type: TextBlock
+                  text: "By Cluster:"
+                  weight: bolder
+                  size: large
+                - type: FactSet
+                  facts:
+                  - title: us-west1-cluster-1
+                    value: 48.5%
+                  - title: us-east1-cluster-1
+                    value: 0%
+                - type: TextBlock
+                  text: "By Route:"
+                  weight: bolder
+                  size: large
+                - type: FactSet
+                  facts:
+                  - title: /
+                    value: 6.3%
+                  - title: /cart
+                    value: 4.5%
+                  - title: /checkout
+                    value: 5.8%
+                  - title: /product
+                    value: 5.2%
+            - type: Container
+              items: 
+              - type: TextBlock
+                text: Suggested Actions
+                weight: bolder
+      url: <webhook url>

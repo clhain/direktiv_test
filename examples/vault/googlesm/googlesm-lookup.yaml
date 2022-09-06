@@ -1,0 +1,193 @@
+# Event Input:
+#  {
+#   "com.f5.vault.lookup.request": {
+#     "data": {
+#         "googlesm": {
+#             "version": "latest",
+#             "secretname": "my-secret"
+#         },
+#     },
+#     "vault": "googlesm",
+#     "ctx": "3d9d7342-b92c-477f-8ce7-050f3b9954ec",
+#     "datacontenttype": "application/json",
+#     "id": "2636c282-2adb-48b1-aafc-d6de7b717546",
+#     "source": "rotate-passwords",
+#     "specversion": "1.0",
+#     "type": "com.f5.vault.lookup.request",
+#   }
+# }
+# Event Output:
+#  {
+#   "com.f5.vault.lookup.complete": {
+#     "data": {
+#         "password": "myPassword",
+#     },
+#     "vault": "googlesm",
+#     "googlesm": {
+#         "version": "latest",
+#         "secretname": "my-secret"
+#     },
+#     "ctx": "3d9d7342-b92c-477f-8ce7-050f3b9954ec",
+#     "datacontenttype": "application/json",
+#     "id": "2636c282-2adb-48b1-aafc-d6de7b717546",
+#     "source": "rotate-passwords",
+#     "specversion": "1.0",
+#     "type": "com.f5.vault.lookup.complete",
+#   }
+# }
+#  {
+#   "com.f5.vault.lookup.failure": {
+#     "data": {
+#       "msg": "error message",
+#       "error": "connection" (or request)
+#     },
+#     "vault": "googlesm",
+#     "googlesm": {
+#         "version": "latest",
+#         "secretname": "my-secret"
+#     },
+#     "ctx": "asdfasfjkasfjalfskd",
+#     "datacontenttype": "application/json",
+#     "id": "2636c282-2adb-48b1-aafc-d6de7b717546",
+#     "source": "rotate-passwords",
+#     "specversion": "1.0",
+#     "type": "com.f5.vault.lookup.failure",
+#   }
+# }
+#
+# NOTE: for Google Cloud Secrets Manager, the GCP_PROJECT & SERVICE_ACCOUNT_KEY needs to be added as sercets in Direktiv
+description: Google Cloud Secrets Manager lookup service
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# master workflow. Example of the event is shown above in the description
+#
+start:
+  type: event
+  state: validate-input
+  event: 
+    type: com.f5.vault.lookup.request
+    context:
+      vault: "googlesm"
+
+#
+# Define the "run-gcloud-command" knative-function to be used for all the Google Secrets Manager 
+# queries and interaction
+#
+functions:
+- id: run-gcloud-command
+  image: gcr.io/direktiv/apps/gcloud:1.0
+  size: medium
+  type: knative-workflow
+
+states:
+#
+# Validate Event Input
+#
+- id: validate-input
+  type: validate
+  subject: jq(."com.f5.vault.lookup.request")
+  schema:
+    title: Execute Bash Command
+    type: object
+    required:
+    - data
+    properties:
+      ctx:
+        type: string
+        title: Event Context
+      vault:
+        type: string
+        title: Vault Store
+        default: "googlesm"
+      data:
+        type: object
+        title: Data
+        required:
+        - googlesm
+        properties:
+          googlesm:
+            title: Google Secret Manager Inputs
+            default: {}
+            type: object
+            properties:
+              secretname:
+                type: string
+                title: Secret Name
+              version:
+                type: string
+                title: Current Version
+                default: "latest"
+  transition: set-data
+
+#
+# Move important fields out of .data for response message.
+#
+- id: set-data
+  type: noop
+  transform: jq(.ctx = ."com.f5.vault.lookup.request".ctx | .vault = ."com.f5.vault.lookup.request".vault | .googlesm = ."com.f5.vault.lookup.request".data.googlesm)
+  transition: lookup-googlesm-secret
+
+#
+# First state looks up the secret from the Google Secrets Manager service. The secrets stored 
+# per project, secret-name, and version.
+- id: lookup-googlesm-secret
+  log: jq(.)
+  type: action
+  action:
+    secrets: ["GCP_PROJECT", "SERVICE_ACCOUNT_KEY"]
+    function: run-gcloud-command
+    input:
+      account: ""
+      project: jq(.secrets.GCP_PROJECT)
+      key: jq(.secrets.SERVICE_ACCOUNT_KEY | @base64 )
+      commands:
+        - command: gcloud secrets versions access jq(.googlesm.version) --secret jq(.googlesm.secretname)
+  catch:
+    - error: "*"
+      transition: failed-request
+  transition: check-response-retrieve
+
+#
+# Make sure we received a valid response
+#
+- id: check-response-retrieve
+  type: switch
+  # log: jq(.)
+  conditions:
+    - condition: 'jq(.return."gcloud"[0].success == "")'
+      transform: jq(del (."com.f5.vault.lookup.request"))
+      transition: failed-request
+  defaultTransition: lookup-complete
+  defaultTransform: jq(.password = .return."gcloud"[0].result | del (.return) | del (."com.f5.vault.lookup.request"))
+
+#
+# Handle any failed API calls
+#
+- id: failed-request
+  type: generateEvent
+  log: Gcloud call failed with error.
+  event: 
+    type: com.f5.vault.lookup.failure
+    source: vaults/googlesm
+    data: jq(.error = "request" | .msg = "Lookup Failed")
+    context:
+      vault: googlesm
+      googlesm: jq(.googlesm)
+      error: request
+      ctx: jq(.ctx)
+
+# Next state will generate a change passwordf event to the specific endpoint. The context is 
+# based on the selection in the previous state
+#
+- id: lookup-complete
+  type: generateEvent
+  log: jq(.)
+  event:
+    type: com.f5.vault.lookup.complete
+    source: vaults/googlesm
+    data: jq(.)
+    context:
+      vault: googlesm
+      googlesm: jq(.googlesm)
+      ctx: jq(.ctx)
